@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shared Audio Player</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; max-width: 540px; margin: auto; background-color: #1e1e1e; color: #ffffff; }
+        .control-group { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; }
+        
+        textarea { flex-grow: 1; padding: 10px; border-radius: 4px; border: 1px solid #444; background: #333; color: white; resize: vertical; font-family: inherit; }
+        input[type="range"] { flex-grow: 1; accent-color: #007bff; }
+        
+        button { padding: 10px 15px; cursor: pointer; border: none; border-radius: 4px; background-color: #007bff; color: white; font-weight: bold; transition: background 0.2s; display: flex; align-items: center; justify-content: center; }
+        button:hover { background-color: #0056b3; }
+        
+        /* Green active state for the repeat button */
+        button.active-mode { background-color: #28a745; }
+        button.active-mode:hover { background-color: #1e7e34; }
+        
+        .btn-icon { width: 20px; height: 20px; vertical-align: middle; display: block; }
+        
+        #status { color: #aaaaaa; font-size: 0.9em; margin-bottom: 15px; }
+        .error-text { color: #ff6b6b !important; font-weight: bold; }
+        
+        .queue-container { background: #2a2a2a; padding: 15px; border-radius: 6px; border: 1px solid #444; }
+        .queue-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        
+        .queue-item { padding: 8px; border-bottom: 1px solid #444; font-size: 0.9em; display: flex; justify-content: space-between; align-items: center; transition: opacity 0.2s; }
+        .queue-item:last-child { border-bottom: none; }
+        .queue-item.active { background: #007bff; border-radius: 4px; border: none; font-weight: bold; }
+        
+        .drag-handle { cursor: grab; padding-right: 12px; font-weight: bold; color: #888; font-size: 1.2em; user-select: none; display: flex; align-items: center; }
+        .drag-handle:active { cursor: grabbing; }
+        .queue-item.dragging { opacity: 0.4; }
+        
+        .remove-btn { background: #dc3545; padding: 5px 10px; font-size: 0.8em; margin-left: 10px; border-radius: 4px; }
+        .remove-btn:hover { background: #c82333; }
+        
+        #join-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        #join-overlay button { font-size: 1.5em; padding: 20px 40px; }
+    </style>
+</head>
+<body>
+    <div id="join-overlay">
+        <button onclick="startSession()">Join Session</button>
+    </div>
+
+    <h2>Shared Audio Player</h2>
+    <div id="status">Waiting to join...</div>
+    
+    <div class="control-group">
+        <textarea id="video-id" placeholder="Paste YouTube Link(s)... separated by spaces or newlines" rows="2"></textarea>
+        <div style="display: flex; flex-direction: column; gap: 5px;">
+            <button onclick="broadcastAdd()" style="flex-grow: 1; padding: 10px 20px;" title="Add to Queue">
+                <img src="/Assets/add.png" class="btn-icon" alt="Add">
+            </button>
+            <button onclick="document.getElementById('file-input').click()" style="padding: 10px 20px; background-color: #6c757d;" title="Import Playlist">
+                <img src="/Assets/upload.png" class="btn-icon" alt="Import">
+            </button>
+            <input type="file" id="file-input" style="display: none;" accept=".txt" onchange="handleImport(event)">
+        </div>
+    </div>
+    
+    <div class="control-group" style="gap: 15px;">
+        <span id="time-display">0:00</span>
+        <input type="range" id="seek-bar" min="0" max="100" value="0" step="1" onchange="broadcastSeek(this.value)">
+    </div>
+
+    <div class="control-group" style="justify-content: center; gap: 8px;">
+        <button onclick="broadcastShuffle()" title="Shuffle Queue">
+            <img src="/Assets/shuffle.png" class="btn-icon" alt="Shuffle">
+        </button>
+
+        <button onclick="broadcastPrev()" title="Previous">
+            <img src="/Assets/rewind.png" class="btn-icon" alt="Prev">
+        </button>
+        
+        <button id="play-pause-btn" onclick="togglePlayPause()" style="min-width: 60px;" title="Play/Pause">
+            <img id="play-pause-icon" src="/Assets/play.png" class="btn-icon" alt="Play">
+        </button>
+        
+        <button onclick="broadcastNext()" title="Next">
+            <img src="/Assets/fast-forward.png" class="btn-icon" alt="Next">
+        </button>
+        
+        <button id="repeat-btn" onclick="broadcastRepeat()" title="Toggle Repeat">
+            <img id="repeat-icon" src="/Assets/repeat.png" class="btn-icon" alt="Repeat">
+        </button>
+    </div>
+
+    <div class="control-group">
+        <label>Volume:</label>
+        <input type="range" id="volume" min="0" max="1" step="0.05" value="0.5" oninput="setVolume(this.value)">
+    </div>
+
+    <div class="queue-container">
+        <div class="queue-header">
+            <h3 style="margin: 0;">Up Next</h3>
+            <button onclick="exportPlaylist()" style="padding: 10px 15px; background: #28a745;" title="Export Playlist">
+                <img src="/Assets/download.png" class="btn-icon" alt="Export">
+            </button>
+        </div>
+        <div id="queue-list"><div class="queue-item">Queue is empty</div></div>
+    </div>
+
+    <audio id="native-audio-player" onended="handleTrackEnded()"></audio>
+
+    <script>
+        let ws;
+        let isSocketReady = false;
+        let errorTimeout;
+        let currentQueueIds = []; 
+        
+        const audioPlayer = document.getElementById("native-audio-player");
+        const seekBar = document.getElementById("seek-bar");
+        const timeDisplay = document.getElementById("time-display");
+        const playPauseIcon = document.getElementById("play-pause-icon");
+        const statusEl = document.getElementById("status");
+
+        audioPlayer.volume = 0.5;
+
+        function setStatus(text, isError = false) {
+            statusEl.innerText = text;
+            if (isError) {
+                statusEl.classList.add("error-text");
+                clearTimeout(errorTimeout);
+                errorTimeout = setTimeout(() => {
+                    statusEl.classList.remove("error-text");
+                    if (audioPlayer.src) statusEl.innerText = "🎵 Playback active";
+                    else statusEl.innerText = "🟢 Connected";
+                }, 4000);
+            } else {
+                statusEl.classList.remove("error-text");
+            }
+        }
+
+        function startSession() {
+            document.getElementById("join-overlay").style.display = "none";
+            audioPlayer.play().catch(() => {});
+            audioPlayer.pause();
+            connectWebSocket();
+        }
+
+        function connectWebSocket() {
+            ws = new WebSocket("ws://" + window.location.host + "/ws");
+            
+            ws.onopen = () => {
+                setStatus("🟢 Connected to Sync Server");
+                isSocketReady = true;
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.action === "state_sync" || data.action === "load_direct") {
+                    if (data.track) {
+                        setStatus("🎵 Loaded: " + data.track.title);
+                        if (!audioPlayer.src.includes(data.track.url)) {
+                            audioPlayer.src = data.track.url;
+                        }
+                        audioPlayer.currentTime = data.time || 0;
+                        if (data.is_playing || data.action === "load_direct") {
+                            audioPlayer.play();
+                            playPauseIcon.src = "/Assets/pause.png";
+                        }
+                    } else if (!data.track && data.action === "state_sync") {
+                        audioPlayer.removeAttribute("src");
+                    }
+                    if (data.action === "state_sync") {
+                        renderQueue(data.queue, data.index);
+                        updateControlsUI(data.repeat);
+                    }
+                }
+                else if (data.action === "play") { 
+                    audioPlayer.play(); 
+                    playPauseIcon.src = "/Assets/pause.png"; 
+                }
+                else if (data.action === "pause") { 
+                    audioPlayer.pause(); 
+                    playPauseIcon.src = "/Assets/play.png"; 
+                }
+                else if (data.action === "seek") { audioPlayer.currentTime = data.time; }
+                else if (data.action === "error") { setStatus("❌ " + data.message, true); }
+                else if (data.action === "queue_update") {
+                    renderQueue(data.queue, data.index);
+                    updateControlsUI(data.repeat);
+                    if (statusEl.innerText.includes("⏳")) {
+                        setStatus("✅ Track(s) processed");
+                    }
+                }
+            };
+        }
+
+        setInterval(() => {
+            if (isSocketReady && !audioPlayer.paused) {
+                ws.send(JSON.stringify({ action: "sync_time", time: audioPlayer.currentTime }));
+            }
+        }, 2000);
+
+        audioPlayer.addEventListener("timeupdate", () => {
+            if (audioPlayer.duration) {
+                seekBar.max = audioPlayer.duration;
+                seekBar.value = audioPlayer.currentTime;
+                
+                let mins = Math.floor(audioPlayer.currentTime / 60);
+                let secs = Math.floor(audioPlayer.currentTime % 60).toString().padStart(2, '0');
+                timeDisplay.innerText = `${mins}:${secs}`;
+            }
+        });
+
+        function broadcastSeek(value) {
+            if (isSocketReady) ws.send(JSON.stringify({ action: "seek", time: parseFloat(value) }));
+        }
+
+        function extractVideoIds(input) {
+            const chunks = input.split(/[\s,]+/);
+            const ids = [];
+            const regex = /(?:youtu\.be\/|youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i;
+            
+            for (let chunk of chunks) {
+                if (!chunk) continue;
+                const match = chunk.match(regex);
+                if (match) {
+                    ids.push(match[1]);
+                } else if (chunk.length === 11 && /^[a-zA-Z0-9_-]{11}$/.test(chunk)) {
+                    ids.push(chunk);
+                }
+            }
+            return ids;
+        }
+
+        function broadcastAdd() {
+            if (!isSocketReady) return;
+            const inputEl = document.getElementById("video-id");
+            const videoIds = extractVideoIds(inputEl.value.trim());
+            
+            if (videoIds.length > 0) {
+                setStatus(`⏳ Extracting ${videoIds.length} track(s)...`);
+                ws.send(JSON.stringify({ action: "add", video_ids: videoIds }));
+                inputEl.value = "";
+            }
+        }
+
+        function handleImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const content = e.target.result;
+                const videoIds = extractVideoIds(content);
+                
+                if (videoIds.length > 0) {
+                    setStatus(`⏳ Importing ${videoIds.length} track(s) from file...`);
+                    if (isSocketReady) {
+                        ws.send(JSON.stringify({ action: "add", video_ids: videoIds }));
+                    }
+                } else {
+                    setStatus("❌ No valid YouTube IDs found in file", true);
+                }
+                event.target.value = ""; 
+            };
+            reader.readAsText(file);
+        }
+
+        function exportPlaylist() {
+            if (currentQueueIds.length === 0) {
+                setStatus("❌ Queue is empty", true);
+                return;
+            }
+            const blob = new Blob([currentQueueIds.join('\n')], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'shared_playlist.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            setStatus("✅ Playlist exported");
+        }
+
+        function togglePlayPause() {
+            if (!isSocketReady) return;
+            if (!audioPlayer.src) return;
+            ws.send(JSON.stringify({ action: audioPlayer.paused ? "play" : "pause" }));
+        }
+
+        function setVolume(val) { audioPlayer.volume = val; }
+        function handleTrackEnded() { if (isSocketReady) ws.send(JSON.stringify({ action: "auto_next" })); }
+        function broadcastNext() { if (isSocketReady) ws.send(JSON.stringify({ action: "next" })); }
+        function broadcastPrev() { if (isSocketReady) ws.send(JSON.stringify({ action: "prev" })); }
+        function broadcastShuffle() { if (isSocketReady) ws.send(JSON.stringify({ action: "shuffle" })); }
+        function broadcastRepeat() { if (isSocketReady) ws.send(JSON.stringify({ action: "toggle_repeat" })); }
+        function broadcastRemove(index) { if (isSocketReady) ws.send(JSON.stringify({ action: "remove", index: index })); }
+        
+        function broadcastReorder(oldIndex, newIndex) {
+            if (isSocketReady) {
+                ws.send(JSON.stringify({ action: "reorder", old_index: oldIndex, new_index: newIndex }));
+            }
+        }
+
+        function renderQueue(queue, currentIndex) {
+            const queueList = document.getElementById("queue-list");
+            queueList.innerHTML = "";
+            currentQueueIds = []; 
+            
+            if (!queue || queue.length === 0) {
+                queueList.innerHTML = "<div class='queue-item'>Queue is empty</div>";
+                return;
+            }
+            
+            queue.forEach((track, idx) => {
+                currentQueueIds.push(track.video_id);
+                
+                const div = document.createElement("div");
+                div.className = "queue-item" + (idx === currentIndex ? " active" : "");
+                div.draggable = true; 
+                
+                div.addEventListener('dragstart', (e) => {
+                    e.dataTransfer.setData('text/plain', idx);
+                    div.classList.add('dragging');
+                });
+                div.addEventListener('dragend', () => div.classList.remove('dragging'));
+                div.addEventListener('dragover', (e) => {
+                    e.preventDefault(); 
+                    div.style.borderTop = "2px dashed #007bff";
+                });
+                div.addEventListener('dragleave', () => div.style.borderTop = "none");
+                div.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    div.style.borderTop = "none";
+                    const oldIndex = parseInt(e.dataTransfer.getData('text/plain'));
+                    if (oldIndex !== idx && !isNaN(oldIndex)) {
+                        broadcastReorder(oldIndex, idx);
+                    }
+                });
+                
+                const leftGroup = document.createElement("div");
+                leftGroup.style.display = "flex";
+                leftGroup.style.alignItems = "center";
+                leftGroup.style.flexGrow = "1";
+                leftGroup.style.overflow = "hidden";
+                
+                const handle = document.createElement("span");
+                handle.className = "drag-handle";
+                handle.innerText = "≡";
+                
+                const link = document.createElement("a");
+                link.href = `https://www.youtube.com/watch?v=${track.video_id}`;
+                link.target = "_blank";
+                link.innerText = (idx + 1) + ". " + track.title;
+                link.style.color = "inherit";
+                link.style.textDecoration = "none";
+                link.style.whiteSpace = "nowrap";
+                link.style.overflow = "hidden";
+                link.style.textOverflow = "ellipsis";
+                link.onmouseover = () => link.style.textDecoration = "underline";
+                link.onmouseout = () => link.style.textDecoration = "none";
+                
+                leftGroup.appendChild(handle);
+                leftGroup.appendChild(link);
+                
+                const removeBtn = document.createElement("button");
+                removeBtn.className = "remove-btn";
+                removeBtn.innerText = "✖";
+                removeBtn.title = "Remove Track";
+                removeBtn.onclick = () => broadcastRemove(idx);
+                
+                div.appendChild(leftGroup);
+                div.appendChild(removeBtn);
+                queueList.appendChild(div);
+            });
+        }
+
+        function updateControlsUI(repeatMode) {
+            const repBtn = document.getElementById("repeat-btn");
+            const repIcon = document.getElementById("repeat-icon");
+            
+            if (repeatMode === "off") {
+                repIcon.src = "/Assets/repeat.png";
+                repBtn.classList.remove("active-mode");
+            } else if (repeatMode === "all") {
+                repIcon.src = "/Assets/repeat.png";
+                repBtn.classList.add("active-mode");
+            } else if (repeatMode === "one") {
+                repIcon.src = "/Assets/repeat-once.png";
+                repBtn.classList.add("active-mode");
+            }
+        }
+    </script>
+</body>
+</html>
