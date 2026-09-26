@@ -1,8 +1,9 @@
 import asyncio
 import random
 import yt_dlp
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+import urllib.request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request # Add Request here
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -22,7 +23,8 @@ def get_audio_info(video_id: str):
             info = ydl.extract_info(video_id, download=False)
             if info:
                 return {
-                    "url": str(info.get('url')),
+                    "raw_url": str(info.get('url')), # Save the real URL behind the scenes
+                    "url": f"/proxy/{video_id}",     # Tell the frontend to hit the proxy
                     "title": str(info.get('title', 'Unknown Title')),
                     "video_id": video_id
                 }
@@ -76,6 +78,56 @@ manager = ConnectionManager()
 async def serve_frontend():
     with open("index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(f.read())
+@app.get("/proxy/{video_id}")
+def proxy_audio(video_id: str, request: Request):
+    target_url = None
+    # Find the raw YouTube URL from the server's queue state
+    for track in manager.original_queue:
+        if track["video_id"] == video_id:
+            target_url = track.get("raw_url")
+            break
+    
+    if not target_url:
+        return HTMLResponse("Stream not found", status_code=404)
+
+    # 1. Grab the Range header from the browser if it wants to seek
+    client_range = request.headers.get("range")
+    
+    # 2. Forward that Range header to YouTube
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    if client_range:
+        headers['Range'] = client_range
+
+    req = urllib.request.Request(target_url, headers=headers)
+    
+    try:
+        resp = urllib.request.urlopen(req)
+        
+        # 3. Capture YouTube's specific response headers to send back to the browser
+        response_headers = {}
+        for key in ["Accept-Ranges", "Content-Range", "Content-Length", "Content-Type"]:
+            val = resp.headers.get(key)
+            if val:
+                response_headers[key] = val
+
+        def stream_generator():
+            try:
+                # Stream the audio in 64KB chunks
+                while chunk := resp.read(65536):
+                    yield chunk
+            except Exception:
+                pass # Silently handle the browser disconnecting during a seek
+
+        return StreamingResponse(
+            stream_generator(), 
+            status_code=resp.status, 
+            headers=response_headers,
+            media_type=response_headers.get("Content-Type", "audio/webm")
+        )
+        
+    except Exception as e:
+        print(f"Proxy error for {video_id}: {e}")
+        return HTMLResponse("Proxy error", status_code=500)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

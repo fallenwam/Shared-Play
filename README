@@ -1,0 +1,48 @@
+Shared Audio Player
+A synchronized YouTube audio room designed for listening with friends in real time over the web. Built with FastAPI WebSockets and yt-dlp, the server acts as a centralized state machine coordinating playback, queue management, and audio streaming across all connected clients.
+
+Features:
+* Real-Time Synchronization: Play, pause, seek, and track transitions sync instantly across all connected peers over WebSockets.
+
+* Built-in Audio Stream Proxy: Proxies audio byte chunks via FastAPI with full HTTP Range request support to prevent YouTube CDN IP-locking.
+
+* Interactive Queue:
+    Drag-and-drop track reordering with automatic playback pointer correction.
+    Click any track title to open the original YouTube video in a new tab.
+    Individual track removal.
+
+* Batch Import & Export:
+    Paste multiple YouTube links or video IDs at once (separated by spaces or newlines).
+    Export the active queue to a plain .txt playlist for later use.
+    Import .txt playlist files directly into the queue.
+* Independent local volume sliders (volume is not synced across clients).
+
+* Zero Client Dependencies: Remote listeners only need a web browser—no software installation or YouTube accounts required.
+
+Prerequisites:
+* Python 3.10+ installed on your host machine.
+* A tunneling utility such as Ngrok or Cloudflare Tunnel (required for sharing across the internet without port forwarding).
+
+Installation & Setup: (Windows, using Ngrok)
+1. Clone the repository:
+    git clone https://github.com/<YourUsername>/Shared-Play.git
+
+2. Create and activate a virtual environment:
+    * python -m venv venv
+    * venv\Scripts\activate
+
+3. Install the dependencies:
+    pip install -r requirements.txt
+
+Running the Application:
+
+1. Start the Uvicorn server:
+    * uvicorn main:app --host 0.0.0.0 --port 8000
+
+2. Open your browser and navigate to:
+    http://localhost:8000
+
+3. Sharing Over the Internet (Ngrok):
+    * In a second terminal window, run (Keep the Uvicorn server running in your first terminal):
+    ngrok http 8000
+    * Copy the generated public forwarding URL (e.g., [https://xxxx-xx-xx.ngrok-free.app](https://xxxx-xx-xx.ngrok-free.app)) and share it with your friends.
